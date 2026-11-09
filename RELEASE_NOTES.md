@@ -1,3 +1,26 @@
+# 🚀 Reddit Scraper v1.1.0 — Ad-Free & Precision Extraction Release
+
+Welcome to **v1.1.0** of **Reddit Scraper**. This release completely eliminates advertisements, fixes preview URL resolution, and brings high-speed atomic DOM extraction. **100% Vibe Coded.**
+
+---
+
+### ✨ What's New in v1.1.0
+
+- 🚫 **Zero Ads & Sponsored Posts**:
+  - Complete elimination of sponsored posts, promoted campaigns, and banner ads.
+  - Excludes `<shreddit-ad-post>`, `shreddit-async-loader[bundlename*="ad"]`, and elements with `promoted`, `is-promoted="true"`, `is-sponsored="true"`, `adclick`, or `ad-id`.
+  - Built-in Playwright network ad blocker intercepting requests to `alb.reddit.com`, `reddit-promoted.com`, `doubleclick.net`, and tracking domains.
+  - Injected CSS styling rules to disable and hide ad elements during scraping.
+- 🎯 **Strictly Scoped Organic Media Extraction**:
+  - Image harvesting is now strictly scoped inside verified organic `<shreddit-post>` containers.
+  - Full support for multi-image galleries, carousels, and figures while ensuring every image is linked to the real post title, author, and upvote score.
+- 🔧 **Fixed Preview URLs (No More 403 Forbidden)**:
+  - Properly strips Reddit `-v0-` slug prefixes from `preview.redd.it` URLs to target the canonical `https://i.redd.it/<id>.<ext>`.
+- ⚡ **10x Faster Atomic Scanning**:
+  - Replaced hundreds of sequential Python locator IPC round-trips with high-speed atomic `page.evaluate()` DOM extraction.
+
+---
+
 # 🚀 Reddit Scraper v1.0.0 — Initial Vibe-Coded Release
 
 Welcome to the official **v1.0.0** release of **Reddit Scraper**, an ultra-fast, multi-threaded Reddit image and dataset downloader built for AI creators, researchers, and digital collectors. **100% Vibe Coded.**

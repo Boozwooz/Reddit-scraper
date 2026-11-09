@@ -46,7 +46,7 @@ except ImportError:
     RICH_AVAILABLE = False
     console = None
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -110,7 +110,8 @@ def sanitize_filename(name: str, max_length: int = 60) -> str:
 def normalize_image_url(url: str) -> Optional[str]:
     """
     Normalizes Reddit image URLs, converting preview/thumbnail links
-    into full-resolution uncompressed source links.
+    into full-resolution uncompressed source links. Filters out ads, UI assets,
+    and external sponsor links.
     """
     if not url:
         return None
@@ -118,9 +119,13 @@ def normalize_image_url(url: str) -> Optional[str]:
     # Unescape entities (e.g. &amp;)
     url = html.unescape(url).strip()
 
-    # Filter out UI assets, emojis, badges, snoos
+    # Filter out UI assets, emojis, badges, snoos, ad trackers, and external previews
     lower = url.lower()
-    if any(k in lower for k in ["snoo", "avatar", "badge", "award", "icon", "styles.redditmedia.com", "redditstatic.com"]):
+    if any(k in lower for k in [
+        "snoo", "avatar", "badge", "award", "icon",
+        "styles.redditmedia.com", "redditstatic.com",
+        "external-preview.redd.it", "alb.reddit.com",
+    ]):
         return None
 
     parsed = urlparse(url)
@@ -129,19 +134,36 @@ def normalize_image_url(url: str) -> Optional[str]:
     # Reddit preview -> full resolution i.redd.it
     if "preview.redd.it" in netloc:
         path = parsed.path
-        clean_url = f"https://i.redd.it{path}"
-        ext = Path(path).suffix.lower()
-        if ext in VALID_IMAGE_EXTS:
-            return clean_url
-        query_params = parse_qs(parsed.query)
-        if "format" in query_params:
-            return f"https://i.redd.it{path}.{query_params['format'][0].lower()}"
-        return clean_url
+        clean_filename = Path(path).name
+        # Remove slug prefix before -v0- if present (e.g. title-slug-v0-mediaid.jpg -> mediaid.jpg)
+        if "-v0-" in clean_filename:
+            clean_filename = clean_filename.split("-v0-")[-1]
+
+        stem = Path(clean_filename).stem
+        ext = Path(clean_filename).suffix.lower()
+
+        # If extension missing, check format in query parameters
+        if not ext or ext not in VALID_IMAGE_EXTS:
+            query_params = parse_qs(parsed.query)
+            if "format" in query_params:
+                ext = f".{query_params['format'][0].lower()}"
+            else:
+                ext = ".jpg"
+
+        if stem and ext in VALID_IMAGE_EXTS:
+            return f"https://i.redd.it/{stem}{ext}"
+        return None
 
     # Direct i.redd.it
     if "i.redd.it" in netloc:
-        clean_path = parsed.path
-        return f"https://i.redd.it{clean_path}"
+        clean_filename = Path(parsed.path).name
+        if "-v0-" in clean_filename:
+            clean_filename = clean_filename.split("-v0-")[-1]
+        stem = Path(clean_filename).stem
+        ext = Path(clean_filename).suffix.lower()
+        if stem and ext in VALID_IMAGE_EXTS:
+            return f"https://i.redd.it/{stem}{ext}"
+        return f"https://i.redd.it/{clean_filename}"
 
     # Imgur support
     if "imgur.com" in netloc:
@@ -258,8 +280,60 @@ class RedditGrabber:
                     user_agent=self.user_agent,
                 )
                 page = context.new_page()
+
+                # Block ad networks, trackers, and telemetry
+                ad_host_patterns = (
+                    "alb.reddit.com",
+                    "reddit-promoted.com",
+                    "doubleclick.net",
+                    "googleads",
+                    "googlesyndication.com",
+                    "amazon-adsystem.com",
+                    "criteo.com",
+                    "scorecardresearch.com",
+                )
+
+                def _block_ads(route):
+                    try:
+                        req_url = route.request.url.lower()
+                        if any(pattern in req_url for pattern in ad_host_patterns):
+                            route.abort()
+                        else:
+                            route.continue_()
+                    except Exception:
+                        pass
+
+                page.route("**/*", _block_ads)
+
+                # Inject CSS ad blocker to prevent rendering or interaction with ads
+                try:
+                    page.add_init_script("""
+                        const style = document.createElement('style');
+                        style.textContent = `
+                            shreddit-ad-post,
+                            shreddit-comments-page-ad,
+                            shreddit-comment-tree-ad,
+                            shreddit-async-loader[bundlename*="ad"],
+                            [data-ad-click-location],
+                            div[data-before-content="advertisement"],
+                            shreddit-post[promoted],
+                            shreddit-post[is-promoted="true"],
+                            shreddit-post[is-sponsored="true"],
+                            [data-testid="ad-post"] {
+                                display: none !important;
+                            }
+                        `;
+                        document.head?.appendChild(style);
+                    """)
+                except Exception:
+                    pass
+
                 page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
-                time.sleep(2.5)
+                try:
+                    page.wait_for_selector("shreddit-post", timeout=15000)
+                except Exception:
+                    pass
+                time.sleep(1.5)
 
                 stuck_cycles = 0
                 last_count = 0
@@ -269,26 +343,86 @@ class RedditGrabber:
                     status_ctx.start()
 
                 while len(self.images) < self.limit:
-                    # 1. Parse <shreddit-post> web components
+                    # Extract only organic posts and their media (strictly ignoring all ads)
                     try:
-                        posts = page.locator("shreddit-post").all()
-                        for post in posts:
-                            content_href = post.get_attribute("content-href") or ""
-                            norm_url = normalize_image_url(content_href)
-                            if norm_url:
+                        batch_posts = page.evaluate("""() => {
+                            const posts = document.querySelectorAll('shreddit-post');
+                            const results = [];
+                            for (const post of posts) {
+                                // Strictly skip any advertisement or promoted post
+                                if (
+                                    post.hasAttribute('promoted') ||
+                                    post.getAttribute('is-promoted') === 'true' ||
+                                    post.getAttribute('is-sponsored') === 'true' ||
+                                    post.hasAttribute('adclick') ||
+                                    post.hasAttribute('ad-id') ||
+                                    post.hasAttribute('ad-events') ||
+                                    post.hasAttribute('ads-correlation-id') ||
+                                    post.closest('shreddit-ad-post') ||
+                                    post.closest('shreddit-async-loader[bundlename*="ad"]') ||
+                                    post.closest('[data-ad-click-location]') ||
+                                    post.closest('div[data-before-content="advertisement"]') ||
+                                    post.closest('[data-testid="ad-post"]')
+                                ) {
+                                    continue;
+                                }
+
+                                const postTitle = post.getAttribute('post-title') || '';
+                                const postAuthor = post.getAttribute('author') || '';
+                                const scoreRaw = post.getAttribute('score') || '0';
+                                const permalink = post.getAttribute('permalink') || '';
+                                const contentHref = post.getAttribute('content-href') || '';
+                                const postId = post.getAttribute('id') || '';
+
+                                const candidateUrls = [];
+                                if (contentHref) {
+                                    candidateUrls.push(contentHref);
+                                }
+
+                                // Extract media scoped strictly within this organic post
+                                const mediaImgs = post.querySelectorAll(
+                                    'gallery-carousel img, shreddit-aspect-ratio img, [slot="post-media-container"] img, figure img, ul img'
+                                );
+                                for (const img of mediaImgs) {
+                                    const src = img.getAttribute('src') || img.src;
+                                    if (src) candidateUrls.push(src);
+                                }
+
+                                const links = post.querySelectorAll('a[href*="i.redd.it"], a[href*="preview.redd.it"]');
+                                for (const a of links) {
+                                    const href = a.getAttribute('href') || a.href;
+                                    if (href) candidateUrls.push(href);
+                                }
+
+                                results.push({
+                                    title: postTitle,
+                                    author: postAuthor,
+                                    score: parseInt(scoreRaw, 10) || 0,
+                                    permalink: permalink.startsWith('/') ? 'https://www.reddit.com' + permalink : permalink,
+                                    postId: postId,
+                                    urls: candidateUrls
+                                });
+                            }
+                            return results;
+                        }""")
+
+                        for item in batch_posts:
+                            post_title = item.get("title", "")
+                            post_author = item.get("author", "")
+                            score = item.get("score", 0)
+                            permalink = item.get("permalink", "")
+                            post_id = item.get("postId", "")
+
+                            for raw_url in item.get("urls", []):
+                                norm_url = normalize_image_url(raw_url)
+                                if not norm_url:
+                                    continue
+
                                 img_id = Path(urlparse(norm_url).path).stem
                                 file_id = f"{self.subreddit}_{img_id}"
+
                                 if file_id not in self.existing_ids and file_id not in self.images:
                                     ext = Path(urlparse(norm_url).path).suffix.lower() or ".jpg"
-                                    post_title = post.get_attribute("post-title") or ""
-                                    post_author = post.get_attribute("author") or ""
-                                    score_raw = post.get_attribute("score") or "0"
-                                    permalink = post.get_attribute("permalink") or ""
-                                    try:
-                                        score = int(score_raw)
-                                    except ValueError:
-                                        score = 0
-
                                     self.images[file_id] = ScrapedImage(
                                         file_id=file_id,
                                         url=norm_url,
@@ -296,52 +430,14 @@ class RedditGrabber:
                                         title=post_title,
                                         author=post_author,
                                         score=score,
-                                        permalink=f"https://www.reddit.com{permalink}" if permalink.startswith("/") else permalink,
-                                        post_id=img_id,
+                                        permalink=permalink,
+                                        post_id=post_id or img_id,
                                         subreddit=self.subreddit,
                                     )
-                    except Exception:
-                        pass
-
-                    # 2. Extract standard <img> elements
-                    try:
-                        for img in page.locator("img").all():
-                            src = img.get_attribute("src") or ""
-                            norm_url = normalize_image_url(src)
-                            if norm_url:
-                                img_id = Path(urlparse(norm_url).path).stem
-                                file_id = f"{self.subreddit}_{img_id}"
-                                if file_id not in self.existing_ids and file_id not in self.images:
-                                    ext = Path(urlparse(norm_url).path).suffix.lower() or ".jpg"
-                                    alt = img.get_attribute("alt") or ""
-                                    self.images[file_id] = ScrapedImage(
-                                        file_id=file_id,
-                                        url=norm_url,
-                                        extension=ext,
-                                        title=alt,
-                                        post_id=img_id,
-                                        subreddit=self.subreddit,
-                                    )
-                    except Exception:
-                        pass
-
-                    # 3. Extract direct <a> image links
-                    try:
-                        for link in page.locator("a[href*='i.redd.it'], a[href*='preview.redd.it']").all():
-                            href = link.get_attribute("href") or ""
-                            norm_url = normalize_image_url(href)
-                            if norm_url:
-                                img_id = Path(urlparse(norm_url).path).stem
-                                file_id = f"{self.subreddit}_{img_id}"
-                                if file_id not in self.existing_ids and file_id not in self.images:
-                                    ext = Path(urlparse(norm_url).path).suffix.lower() or ".jpg"
-                                    self.images[file_id] = ScrapedImage(
-                                        file_id=file_id,
-                                        url=norm_url,
-                                        extension=ext,
-                                        post_id=img_id,
-                                        subreddit=self.subreddit,
-                                    )
+                                    if len(self.images) >= self.limit:
+                                        break
+                            if len(self.images) >= self.limit:
+                                break
                     except Exception:
                         pass
 

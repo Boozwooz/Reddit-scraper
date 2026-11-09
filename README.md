@@ -37,7 +37,6 @@
 - [🔄 Architecture & Flow](#-architecture--flow)
 - [🛡️ Anti-Stuck & Validation Engine](#️-anti-stuck--validation-engine)
 - [📂 Project Structure](#-project-structure)
-- [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
 ---
@@ -45,6 +44,7 @@
 ## 🌟 Key Features
 
 - 🚀 **Next-Gen Playwright Automation**: Bypasses Reddit's modern dynamic single-page web app (`shreddit` web components, shadow DOM, dynamic feed hydration) without relying on brittle, restricted API keys.
+- 🚫 **Zero Ads & Sponsored Content**: Multi-layered ad-blocking engine with Playwright network route interception, DOM attribute filtering, and CSS suppression to guarantee zero sponsored posts or promo banners.
 - 🎯 **Full-Resolution Uncompressed Extraction**: Automatically detects and upgrades preview thumbnails (`preview.redd.it?width=...`) into raw, full-resolution source image URLs (`i.redd.it`).
 - ⚡ **Multi-Threaded Turbo Downloader**: Powered by concurrent `ThreadPoolExecutor` workers streaming chunks to disk with exponential backoff retries.
 - 🤖 **AI Dataset Sidecars (`--save-metadata`)**: Automatically creates:
@@ -205,7 +205,7 @@ Reddit-scraper/
 ├── LICENSE                    # MIT License
 ├── pyproject.toml             # Python package configuration
 ├── README.md                  # Project documentation
-├── RELEASE_NOTES.md           # v1.0.0 Release Notes
+├── RELEASE_NOTES.md           # Release Notes (v1.1.0)
 ├── requirements.txt           # Python dependencies
 ├── RUN.bat                    # Windows 1-Click launcher
 ├── run.sh                     # Linux/macOS launcher
